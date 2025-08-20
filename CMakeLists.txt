@@ -11,7 +11,7 @@ set(EXTRA_COMPONENT_DIRS
   #       `components/` folder within this repository and update the line below
   #       to point to it.
   #
-  "components"
+  # "components"
 
   # NOTE: if we didn't use the idf-component-manager to get the espp
   #       dependencies, we could instead have ESPP be a submodule within our

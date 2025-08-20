@@ -1,0 +1,6 @@
+{
+	"terminal.integrated.env.linux": {
+		"IDF_PATH": "${config:idf.idfPath}",
+		"IDF_TOOLS_PATH": "${config:idf.toolsPath}",
+	}
+}

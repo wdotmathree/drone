@@ -1,12 +1,21 @@
 #include <iostream>
+#include <mutex>
 
 #include <i2c_master.hpp>
 #include <interrupt.hpp>
 #include <madgwick_filter.hpp>
+#include <pid.hpp>
+
+#include <driver/ledc.h>
 
 #define ACC_SCALE 4
 #define GYRO_SCALE 500
 #define CALIBRATION_ITS 600
+
+#define NW_GPIO 16
+#define NE_GPIO 17
+#define SE_GPIO 18
+#define SW_GPIO 19
 
 espp::I2cMasterBus
 	bus(espp::I2cMasterBus::Config{
@@ -80,29 +89,152 @@ extern "C" void app_main(void) {
 	for (int i = 0; i < 6; i++)
 		bias[i] = bias_tmp[i] / CALIBRATION_ITS;
 
+	// Initialize LEDC for motor control
+	ledc_timer_config_t cfg = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.duty_resolution = LEDC_TIMER_10_BIT,
+		.timer_num = LEDC_TIMER_0,
+		.freq_hz = 100,
+		.clk_cfg = LEDC_AUTO_CLK,
+	};
+	ledc_timer_config(&cfg);
+	ledc_channel_config_t nw_cfg = {
+		.gpio_num = NW_GPIO,
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_0,
+		.timer_sel = LEDC_TIMER_0,
+		.duty = 0,
+		.hpoint = 0,
+	};
+	ledc_channel_config(&nw_cfg);
+	ledc_channel_config_t ne_cfg = {
+		.gpio_num = NE_GPIO,
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_1,
+		.timer_sel = LEDC_TIMER_0,
+		.duty = 0,
+		.hpoint = 0,
+	};
+	ledc_channel_config(&ne_cfg);
+	ledc_channel_config_t se_cfg = {
+		.gpio_num = SE_GPIO,
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_2,
+		.timer_sel = LEDC_TIMER_0,
+		.duty = 0,
+		.hpoint = 0,
+	};
+	ledc_channel_config(&se_cfg);
+	ledc_channel_config_t sw_cfg = {
+		.gpio_num = SW_GPIO,
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_3,
+		.timer_sel = LEDC_TIMER_0,
+		.duty = 0,
+		.hpoint = 0,
+	};
+	ledc_channel_config(&sw_cfg);
+
+	// Initialize PIDs (default values)
+	espp::Pid pit_pid({
+		.kp = 0.5f,
+		.ki = 0.0f,
+		.kd = 0.0f,
+		.integrator_min = -1.0f,
+		.integrator_max = 1.0f,
+		.output_min = -1.0f,
+		.output_max = 1.0f,
+	});
+	espp::Pid rol_pid({
+		.kp = 0.5f,
+		.ki = 0.0f,
+		.kd = 0.0f,
+		.integrator_min = -1.0f,
+		.integrator_max = 1.0f,
+		.output_min = -1.0f,
+		.output_max = 1.0f,
+	});
+	espp::Pid yaw_pid({
+		.kp = 0.5f,
+		.ki = 0.0f,
+		.kd = 0.0f,
+		.integrator_min = -1.0f,
+		.integrator_max = 1.0f,
+		.output_min = -1.0f,
+		.output_max = 1.0f,
+	});
+	espp::Pid acc_pid({
+		.kp = 0.5f,
+		.ki = 0.0f,
+		.kd = 0.0f,
+		.integrator_min = -1.0f,
+		.integrator_max = 1.0f,
+		.output_min = 0.0f,
+		.output_max = 1.0f,
+	});
+
 	// Get precise time
 	uint64_t prev = esp_timer_get_time();
+	// vTaskDelay(1);
 	while (true) {
-		// vTaskDelay(1);
+		// Get sensor data
 		imu_device->read_register(0x3b, (uint8_t *)buf, 14, ec);
 		if (ec)
 			continue;
-
 		uint64_t now = esp_timer_get_time();
 
+		// Convert to float
 		float az = (float)(int16_t)__bswap16(buf[0]) / (32768.0f / ACC_SCALE);
 		float ay = (float)(int16_t)__bswap16(buf[1]) / (32768.0f / ACC_SCALE);
 		float ax = -(float)(int16_t)__bswap16(buf[2]) / (32768.0f / ACC_SCALE);
 		float gz = (float)((int16_t)__bswap16(buf[4]) - bias[3]) / (32768.0f / GYRO_SCALE) * (M_PI / 180.0f);
-		float gy = (float)(int16_t)__bswap16(buf[5]) / (32768.0f / GYRO_SCALE) * (M_PI / 180.0f);
-		float gx = -(float)(int16_t)__bswap16(buf[6]) / (32768.0f / GYRO_SCALE) * (M_PI / 180.0f);
+		float gy = (float)((int16_t)__bswap16(buf[5]) - bias[4]) / (32768.0f / GYRO_SCALE) * (M_PI / 180.0f);
+		float gx = -(float)((int16_t)__bswap16(buf[6]) - bias[5]) / (32768.0f / GYRO_SCALE) * (M_PI / 180.0f);
 
+		// Normalize accelerometer values and update filter
 		float mag = espp::fast_inv_sqrt(ax * ax + ay * ay + az * az);
-		filter.update((now - prev) / 1000000.f, ax * mag, ay * mag, az * mag, gx, gy, gz);
-
-		filter.get_euler(gx, gy, gz);
-		printf("%11.6f %11.6f %11.6f\n", gx, gy, gz);
-
+		filter.update((now - prev) / 1000000.0f, ax * mag, ay * mag, az * mag, gx, gy, gz);
 		prev = now;
+
+		// Should be (pitch, roll, yaw)
+		filter.get_euler(gx, gy, gz);
+		// printf("%11.6f %11.6f %11.6f\n", gx, gy, gz);
+
+		// Mock values for testing
+		float req_gx = 0; // Requested pitch
+		float req_gy = 0; // Requested roll
+		float req_gz = 0; // Requested yaw
+		float req_va = 0; // Requested vertical acceleration
+
+		// Current values
+		float cur_pit = gx;
+		float cur_rol = gy;
+		float cur_yaw = gz;
+		float cur_acc = espp::fast_cos(gx) * espp::fast_cos(gy) * az;
+
+		// Input into PID controller
+		float pit_out = pit_pid(req_gx - cur_pit);
+		float rol_out = rol_pid(req_gy - cur_rol);
+		float yaw_out = yaw_pid(req_gz - cur_yaw);
+		float acc_out = acc_pid(req_va - cur_acc);
+
+		// Mix and clamp outputs
+		float nw = std::clamp(acc_out + pit_out + rol_out + yaw_out, 0.0f, 1.0f);
+		float ne = std::clamp(acc_out + pit_out - rol_out - yaw_out, 0.0f, 1.0f);
+		float se = std::clamp(acc_out - pit_out - rol_out + yaw_out, 0.0f, 1.0f);
+		float sw = std::clamp(acc_out - pit_out + rol_out - yaw_out, 0.0f, 1.0f);
+
+		// Print outputs
+		printf("NW: %11.6f, NE: %11.6f, SE: %11.6f, SW: %11.6f\n", nw, ne, se, sw);
+
+		// Set outputs to motors
+		ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (nw + 1) * 51);
+		ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+		ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, (ne + 1) * 51);
+		ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+		ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, (se + 1) * 51);
+		ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
+		ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, (sw + 1) * 51);
+		ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3);
 	}
 }
