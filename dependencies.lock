@@ -141,10 +141,46 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.0.21
+  espp/socket:
+    component_hash: e6b5e954bb2ca364e2320c57121d7fe0a8895ce2574c00815f9601b93808290c
+    dependencies:
+    - name: espp/base_component
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: espp/task
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.21
   espp/task:
     component_hash: 0615067ff8ce1580ac46e1a68e4010a78338175f4bc37d663ef8c5c423c8c77c
     dependencies:
     - name: espp/base_component
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.21
+  espp/wifi:
+    component_hash: d9a8070c326acfc11f7c7df171b6dfc8317751873c74abea24dfa02ee4877758
+    dependencies:
+    - name: espp/base_component
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0'
+    - name: espp/cli
       registry_url: https://components.espressif.com
       require: private
       version: '>=1.0'
@@ -198,9 +234,11 @@ direct_dependencies:
 - espp/i2c
 - espp/interrupt
 - espp/pid
+- espp/socket
 - espp/task
+- espp/wifi
 - espressif/esp32-camera
 - idf
-manifest_hash: 118c23c7b0305ac8e47b7a38eab559061008ca5d7c53a383548b11e188fdd1e4
+manifest_hash: 22e45969c699309f6c3f930507e285cf2fa66c5ded105cd552876bad8b18b974
 target: esp32
 version: 2.0.0

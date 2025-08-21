@@ -1,3 +1,5 @@
+#include "secrets.hpp"
+
 #include <iostream>
 #include <mutex>
 
@@ -5,6 +7,8 @@
 #include <interrupt.hpp>
 #include <madgwick_filter.hpp>
 #include <pid.hpp>
+#include <udp_socket.hpp>
+#include <wifi_ap.hpp>
 
 #include <driver/ledc.h>
 
@@ -66,11 +70,17 @@ bool init(void) {
 
 extern "C" void app_main(void) {
 	std::error_code ec;
-
 	if (!init())
 		return;
 
-	std::cout << "Hello, World!" << std::endl;
+	// Initialize WiFi AP
+	espp::WifiAp wifi_ap({
+		.ssid = WIFI_AP_SSID,
+		.password = WIFI_AP_PASSWORD,
+		.channel = 1,
+		.max_number_of_stations = 1,
+	});
+	wifi_ap.start();
 
 	// Calibrate
 	vTaskDelay(10);
@@ -136,7 +146,7 @@ extern "C" void app_main(void) {
 	ledc_channel_config(&sw_cfg);
 
 	// Initialize PIDs (default values)
-	espp::Pid pit_pid({
+	espp::Pid::Config pit_cfg = {
 		.kp = 0.5f,
 		.ki = 0.0f,
 		.kd = 0.0f,
@@ -144,8 +154,9 @@ extern "C" void app_main(void) {
 		.integrator_max = 1.0f,
 		.output_min = -1.0f,
 		.output_max = 1.0f,
-	});
-	espp::Pid rol_pid({
+	};
+	espp::Pid pit_pid(pit_cfg);
+	espp::Pid::Config rol_cfg = {
 		.kp = 0.5f,
 		.ki = 0.0f,
 		.kd = 0.0f,
@@ -153,8 +164,9 @@ extern "C" void app_main(void) {
 		.integrator_max = 1.0f,
 		.output_min = -1.0f,
 		.output_max = 1.0f,
-	});
-	espp::Pid yaw_pid({
+	};
+	espp::Pid rol_pid(rol_cfg);
+	espp::Pid::Config yaw_cfg = {
 		.kp = 0.5f,
 		.ki = 0.0f,
 		.kd = 0.0f,
@@ -162,8 +174,9 @@ extern "C" void app_main(void) {
 		.integrator_max = 1.0f,
 		.output_min = -1.0f,
 		.output_max = 1.0f,
-	});
-	espp::Pid acc_pid({
+	};
+	espp::Pid yaw_pid(yaw_cfg);
+	espp::Pid::Config acc_cfg = {
 		.kp = 0.5f,
 		.ki = 0.0f,
 		.kd = 0.0f,
@@ -171,12 +184,88 @@ extern "C" void app_main(void) {
 		.integrator_max = 1.0f,
 		.output_min = 0.0f,
 		.output_max = 1.0f,
-	});
+	};
+	espp::Pid acc_pid(acc_cfg);
+
+	// Controller packet handlers
+	std::atomic<bool> ready = false;
+	espp::UdpSocket socket({.log_level = espp::Logger::Verbosity::WARN});
+	espp::Task::BaseConfig task_config{
+		.name = "UdpSocketTask",
+		.stack_size_bytes = 4096,
+		.priority = 1,
+	};
+	espp::UdpSocket::ReceiveConfig receive_config{
+		.port = 12345,
+		.buffer_size = 1024,
+		.is_multicast_endpoint = false,
+		.on_receive_callback = [&](std::vector<uint8_t> &data, const espp::Socket::Info &sender_info) {
+			if (data.size() < 1)
+				return std::nullopt;
+
+			if (data[0] == 'R') { // Ready command
+				ready.store(true);
+				printf("Controller is ready!\n");
+			} else if (data[0] == 'S') { // Stop command
+				ready.store(false);
+				printf("Controller is stopped!\n");
+			} else if (data[0] == 'C') {
+				float *options = (float *)(data.data() + 2);
+				if (data[1] == 'P') {
+					pit_cfg.kp = options[0];
+					pit_cfg.ki = options[1];
+					pit_cfg.kd = options[2];
+					pit_cfg.integrator_min = options[3];
+					pit_cfg.integrator_max = options[4];
+					pit_pid.set_config(pit_cfg);
+				} else if (data[1] == 'R') {
+					rol_cfg.kp = options[0];
+					rol_cfg.ki = options[1];
+					rol_cfg.kd = options[2];
+					rol_cfg.integrator_min = options[3];
+					rol_cfg.integrator_max = options[4];
+					rol_pid.set_config(rol_cfg);
+				} else if (data[1] == 'Y') {
+					yaw_cfg.kp = options[0];
+					yaw_cfg.ki = options[1];
+					yaw_cfg.kd = options[2];
+					yaw_cfg.integrator_min = options[3];
+					yaw_cfg.integrator_max = options[4];
+					yaw_pid.set_config(yaw_cfg);
+				} else if (data[1] == 'A') {
+					acc_cfg.kp = options[0];
+					acc_cfg.ki = options[1];
+					acc_cfg.kd = options[2];
+					acc_cfg.integrator_min = options[3];
+					acc_cfg.integrator_max = options[4];
+					acc_pid.set_config(acc_cfg);
+				}
+			}
+			return std::nullopt;
+		},
+	};
+	socket.start_receiving(task_config, receive_config);
 
 	// Get precise time
 	uint64_t prev = esp_timer_get_time();
 	// vTaskDelay(1);
 	while (true) {
+		// Shutdown engines if controller is not ready
+		if (!ready.load()) {
+			ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+			ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+			ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
+			ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+			ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, 0);
+			ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
+			ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, 0);
+			ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3);
+
+			vTaskDelay(100 / portTICK_PERIOD_MS);
+			prev = esp_timer_get_time();
+			continue;
+		}
+
 		// Get sensor data
 		imu_device->read_register(0x3b, (uint8_t *)buf, 14, ec);
 		if (ec)
@@ -219,10 +308,11 @@ extern "C" void app_main(void) {
 		float acc_out = acc_pid(req_va - cur_acc);
 
 		// Mix and clamp outputs
-		float nw = std::clamp(acc_out + pit_out + rol_out + yaw_out, 0.0f, 1.0f);
-		float ne = std::clamp(acc_out + pit_out - rol_out - yaw_out, 0.0f, 1.0f);
-		float se = std::clamp(acc_out - pit_out - rol_out + yaw_out, 0.0f, 1.0f);
-		float sw = std::clamp(acc_out - pit_out + rol_out - yaw_out, 0.0f, 1.0f);
+		// Need sqrt because thrust is proportional to square of speed
+		float nw = std::sqrtf(std::clamp(acc_out + pit_out + rol_out + yaw_out, 0.0f, 1.0f));
+		float ne = std::sqrtf(std::clamp(acc_out + pit_out - rol_out - yaw_out, 0.0f, 1.0f));
+		float se = std::sqrtf(std::clamp(acc_out - pit_out - rol_out + yaw_out, 0.0f, 1.0f));
+		float sw = std::sqrtf(std::clamp(acc_out - pit_out + rol_out - yaw_out, 0.0f, 1.0f));
 
 		// Print outputs
 		printf("NW: %11.6f, NE: %11.6f, SE: %11.6f, SW: %11.6f\n", nw, ne, se, sw);

@@ -20,3 +20,5 @@ dependencies:
   espp/interrupt: ^1.0.21
   esp32-camera: ^2.1.2
   espp/pid: ^1.0.21
+  espp/wifi: ^1.0.21
+  espp/socket: ^1.0.21
